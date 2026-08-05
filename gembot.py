@@ -243,7 +243,7 @@ async def query_gemini_stream(chat_id: int, user_message: str) -> str:
                         try:
                             chunk = json.loads(data_str)
                             delta = chunk.get("choices", [{}])[0].get("delta", {})
-                            content = delta.get("content")
+                            content = delta.get("content") or delta.get("reasoning_content")
                             if content:
                                 accumulated += content
                         except json.JSONDecodeError:
@@ -288,7 +288,8 @@ async def cmd_panel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not msg or not msg.from_user:
         return
 
-    if msg.from_user.id != ADMIN_USER_ID and msg.from_user.username != ADMIN_USERNAME:
+    is_admin = (msg.from_user.id == ADMIN_USER_ID) or (msg.from_user.username and msg.from_user.username.lower() == ADMIN_USERNAME.lower())
+    if not is_admin:
         await msg.reply_text("stfu you ain't my admin nigga 🖕😂")
         return
     text = "🎛️ **GemAI Command Center** 🎛️\n\nManage all bot settings instantly below:"
@@ -299,7 +300,8 @@ async def cmd_sethome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not msg or not msg.from_user:
         return
 
-    if msg.from_user.id != ADMIN_USER_ID and msg.from_user.username != ADMIN_USERNAME:
+    is_admin = (msg.from_user.id == ADMIN_USER_ID) or (msg.from_user.username and msg.from_user.username.lower() == ADMIN_USERNAME.lower())
+    if not is_admin:
         await msg.reply_text("stfu you ain't my admin nigga 🖕😂")
         return
 
@@ -313,7 +315,8 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     user = query.from_user
-    if user.id != ADMIN_USER_ID and user.username != ADMIN_USERNAME:
+    is_admin = (user.id == ADMIN_USER_ID) or (user.username and user.username.lower() == ADMIN_USERNAME.lower())
+    if not is_admin:
         await query.answer("Unauthorized!", show_alert=True)
         return
 
@@ -348,7 +351,6 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         pass
 
     save_settings(bot_settings)
-    git_push_state(force=True)
 
     try:
         await query.edit_message_text(
@@ -356,8 +358,10 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_control_panel_markup(),
             parse_mode="Markdown"
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"Error updating panel markup: {e}")
+
+    asyncio.create_task(asyncio.to_thread(git_push_state, True))
 
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -469,7 +473,7 @@ async def respond_to_message(msg, bot_info):
                         try:
                             chunk = json.loads(data_str)
                             delta = chunk.get("choices", [{}])[0].get("delta", {})
-                            content = delta.get("content")
+                            content = delta.get("content") or delta.get("reasoning_content")
                             if content:
                                 accumulated += content
                         except json.JSONDecodeError:
