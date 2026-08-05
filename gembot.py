@@ -25,7 +25,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, Callb
 
 # ---------------------------------------------------------------- config
 TOKEN = os.environ.get("TG_BOT_TOKEN", "")
-MODEL_NAME = os.environ.get("MODEL_NAME", "DS")
+MODEL_NAME = os.environ.get("MODEL_NAME", "DS1")
 ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "6592796294"))
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "Mokingh")
 
