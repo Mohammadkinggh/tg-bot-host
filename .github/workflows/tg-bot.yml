@@ -1,0 +1,30 @@
+name: tg-bot
+
+on:
+  schedule:
+    # Every 5 hours at minute 0 — each run polls ~4h45m then hands off.
+    - cron: "0 */5 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: tg-bot
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run bot poller
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GIST_ID: "3a8070c4eb78f374c54a518bf18da1f0"
+          RUN_MINUTES: "285"
+        run: python bot.py
