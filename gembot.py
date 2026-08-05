@@ -25,6 +25,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, Callb
 
 # ---------------------------------------------------------------- config
 TOKEN = os.environ.get("TG_BOT_TOKEN", "")
+MODEL_NAME = os.environ.get("MODEL_NAME", "DS1")
 ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "6592796294"))
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "Mokingh")
 
@@ -222,7 +223,7 @@ async def query_gemini_stream(chat_id: int, user_message: str) -> str:
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "Gemini",
+        "model": MODEL_NAME,
         "messages": messages,
         "stream": True
     }
@@ -448,7 +449,7 @@ async def respond_to_message(msg, bot_info):
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "Gemini",
+        "model": MODEL_NAME,
         "messages": messages,
         "stream": True
     }
