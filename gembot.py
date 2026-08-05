@@ -487,7 +487,7 @@ async def respond_to_message(msg, bot_info):
     context_history[chat_id_str].append({"role": "assistant", "content": reply_text})
     trim_history_to_64k(chat_id_str)
     save_history(context_history)
-    git_push_state()
+    asyncio.create_task(asyncio.to_thread(git_push_state))
 
     user_tag = f"@{msg.from_user.username}" if msg.from_user.username else msg.from_user.first_name
     final_reply = f"{user_tag} {reply_text}"
