@@ -43,6 +43,8 @@ STATE_PUSH_INTERVAL = int(os.environ.get("STATE_PUSH_INTERVAL", "5"))  # minutes
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+GIT_LOCK = asyncio.Lock()
+
 # ---------------------------------------------------------------- git state persistence
 _last_push = 0.0
 
@@ -69,6 +71,12 @@ def git_push_state(force: bool = False) -> None:
     _git("add", "-A")
     _git("commit", "-m", f"state sync {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}")
     _git("push", f"https://x-access-token:{gh_token}@github.com/{repo}.git", "HEAD:main")
+
+async def background_push(force: bool = False, message: str = None):
+    """Push to git using a lock to prevent concurrent process conflicts."""
+    async with GIT_LOCK:
+        # Run the git commands in a thread so they don't block the event loop
+        await asyncio.to_thread(git_push_state, force, message)
 
 # ---------------------------------------------------------------- encryption / state storage
 ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY", "").strip()
@@ -361,7 +369,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error updating panel markup: {e}")
 
-    asyncio.create_task(asyncio.to_thread(git_push_state, True))
+    asyncio.create_task(background_push(True, f"panel update: {data}"))
 
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -487,7 +495,7 @@ async def respond_to_message(msg, bot_info):
     context_history[chat_id_str].append({"role": "assistant", "content": reply_text})
     trim_history_to_64k(chat_id_str)
     save_history(context_history)
-    asyncio.create_task(asyncio.to_thread(git_push_state))
+    asyncio.create_task(background_push())
 
     user_tag = f"@{msg.from_user.username}" if msg.from_user.username else msg.from_user.first_name
     final_reply = f"{user_tag} {reply_text}"
