@@ -69,6 +69,54 @@ def git_push_state(force: bool = False) -> None:
     _git("commit", "-m", f"state sync {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}")
     _git("push", f"https://x-access-token:{gh_token}@github.com/{repo}.git", "HEAD:main")
 
+# ---------------------------------------------------------------- encryption / state storage
+ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY", "").strip()
+
+def encrypt_and_save(file_path: str, data: dict):
+    raw_json = json.dumps(data, ensure_ascii=False, indent=2)
+    # Write plain local JSON
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(raw_json)
+    except Exception as e:
+        logger.error(f"Error saving {file_path}: {e}")
+
+    # Write encrypted version if key present
+    if ENCRYPTION_KEY:
+        try:
+            from cryptography.fernet import Fernet
+            f_obj = Fernet(ENCRYPTION_KEY.encode())
+            enc_bytes = f_obj.encrypt(raw_json.encode("utf-8"))
+            enc_file = file_path.rsplit(".", 1)[0] + ".enc"
+            with open(enc_file, "wb") as f:
+                f.write(enc_bytes)
+        except Exception as e:
+            logger.error(f"[crypto] encryption failed for {file_path}: {e}")
+
+def decrypt_and_load(file_path: str) -> dict:
+    enc_file = file_path.rsplit(".", 1)[0] + ".enc"
+    if ENCRYPTION_KEY and os.path.exists(enc_file):
+        try:
+            from cryptography.fernet import Fernet
+            f_obj = Fernet(ENCRYPTION_KEY.encode())
+            with open(enc_file, "rb") as f:
+                enc_bytes = f.read()
+            raw_json = f_obj.decrypt(enc_bytes).decode("utf-8")
+            # Cache locally as plaintext json
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(raw_json)
+            return json.loads(raw_json)
+        except Exception as e:
+            logger.error(f"[crypto] decryption failed for {enc_file}: {e}")
+
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Error loading {file_path}: {e}")
+    return {}
+
 # ---------------------------------------------------------------- settings
 DEFAULT_SETTINGS = {
     "bot_active": True,
@@ -82,20 +130,11 @@ DEFAULT_SETTINGS = {
 }
 
 def load_settings() -> dict:
-    if os.path.exists(SETTINGS_FILE):
-        try:
-            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-                return {**DEFAULT_SETTINGS, **json.load(f)}
-        except Exception as e:
-            logger.error(f"Error loading settings: {e}")
-    return DEFAULT_SETTINGS.copy()
+    loaded = decrypt_and_load(SETTINGS_FILE)
+    return {**DEFAULT_SETTINGS, **loaded} if loaded else DEFAULT_SETTINGS.copy()
 
 def save_settings(settings: dict):
-    try:
-        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump(settings, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error(f"Error saving settings: {e}")
+    encrypt_and_save(SETTINGS_FILE, settings)
 
 bot_settings = load_settings()
 
@@ -146,20 +185,10 @@ Rules:
 """
 
 def load_history() -> dict:
-    if os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"Error loading history: {e}")
-    return {}
+    return decrypt_and_load(DB_FILE)
 
 def save_history(history: dict):
-    try:
-        with open(DB_FILE, "w", encoding="utf-8") as f:
-            json.dump(history, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error(f"Error saving history: {e}")
+    encrypt_and_save(DB_FILE, history)
 
 context_history = load_history()
 

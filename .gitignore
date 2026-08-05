@@ -1,0 +1,10 @@
+# Git ignore plain text state files
+*.json
+!gembot.py
+!bot.py
+# But keep encrypted versions
+!*.enc
+# Ignore venv and caches
+__pycache__/
+*.pyc
+.env

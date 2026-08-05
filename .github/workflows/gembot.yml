@@ -26,7 +26,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install deps
-        run: pip install --quiet python-telegram-bot==22.6 httpx==0.28.1
+        run: pip install --quiet python-telegram-bot==22.6 httpx==0.28.1 cryptography
 
       - name: Run GemBot (4h45m window)
         env:
@@ -34,6 +34,7 @@ jobs:
           ROUTER_API_KEY: ${{ secrets.ROUTER_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           ROUTER_URL: ${{ secrets.ROUTER_URL }}
+          ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
           STATE_DIR: ${{ github.workspace }}
           RUN_MINUTES: "285"
           STATE_PUSH_INTERVAL: "5"
