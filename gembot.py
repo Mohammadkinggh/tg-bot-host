@@ -574,7 +574,15 @@ async def run_until_deadline(app, deadline: float) -> None:
 
     async with app:
         await app.start()
-        await app.updater.start_polling(drop_pending_updates=False)
+        await app.updater.start_polling(
+            drop_pending_updates=False,
+            allowed_updates=[
+                "message", "edited_message", "channel_post", "edited_channel_post",
+                "inline_query", "chosen_inline_result", "callback_query",
+                "shipping_query", "pre_checkout_query", "poll", "poll_answer",
+                "my_chat_member", "chat_member", "chat_join_request",
+            ],
+        )
         while time.time() < deadline:
             await asyncio.sleep(5)
         await app.updater.stop()
