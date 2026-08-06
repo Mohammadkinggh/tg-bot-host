@@ -31,6 +31,16 @@ MODEL_NAME = os.environ.get("MODEL_NAME", "DS1")
 ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "6592796294"))
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "Mokingh")
 
+ADMIN_USER_IDS = [6592796294, 8439794110]
+ADMIN_USERNAMES = ["mokingh", "alidabigpoly"]
+
+def is_admin_user(user_id: int, username: str | None = None) -> bool:
+    if user_id in ADMIN_USER_IDS:
+        return True
+    if username and username.lower() in ADMIN_USERNAMES:
+        return True
+    return False
+
 ROUTER_URL = os.environ.get("ROUTER_URL", "https://9router-production-2d70.up.railway.app/v1")
 OPENAI_API_KEY = os.environ.get("ROUTER_API_KEY", "")
 
@@ -302,7 +312,7 @@ async def cmd_panel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     user = msg.from_user
-    is_admin = (user.id == ADMIN_USER_ID) or (user.username and user.username.lower() == ADMIN_USERNAME.lower())
+    is_admin = is_admin_user(user.id, user.username)
     
     if bot_settings.get("debug_mode", True):
         debug_info = (
@@ -326,7 +336,8 @@ async def cmd_sethome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not msg or not msg.from_user:
         return
 
-    is_admin = (msg.from_user.id == ADMIN_USER_ID) or (msg.from_user.username and msg.from_user.username.lower() == ADMIN_USERNAME.lower())
+    user = msg.from_user
+    is_admin = is_admin_user(user.id, user.username)
     if not is_admin:
         await msg.reply_text("stfu you ain't my admin nigga 🖕😂")
         return
@@ -350,7 +361,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     global bot_settings
     try:
         user = query.from_user
-        is_admin = (user.id == ADMIN_USER_ID) or (user.username and user.username.lower() == ADMIN_USERNAME.lower())
+        is_admin = is_admin_user(user.id, user.username)
         if not is_admin:
             return
 
