@@ -340,33 +340,21 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query or not query.from_user:
         return
+    
+    # 1. Answer immediately so buttons never spin or timeout
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
     global bot_settings
     try:
         user = query.from_user
         is_admin = (user.id == ADMIN_USER_ID) or (user.username and user.username.lower() == ADMIN_USERNAME.lower())
-        data = query.data
-
-        if bot_settings.get("debug_mode", True):
-            debug_info = (
-                f"🐛 **Panel Action Debug**\n"
-                f"User: `@{user.username}` (`{user.id}`)\n"
-                f"Is Admin: `{is_admin}`\n"
-                f"Button Clicked: `{data}`"
-            )
-            # Send debug info to the clicking user
-            try:
-                await ctx.bot.send_message(chat_id=user.id, text=debug_info, parse_mode="Markdown")
-                if user.id != ADMIN_USER_ID:
-                    await ctx.bot.send_message(chat_id=ADMIN_USER_ID, text=f"Admin Alert: {debug_info}", parse_mode="Markdown")
-            except:
-                pass
-
         if not is_admin:
-            await query.answer(f"Unauthorized! Your ID: {user.id}, Username: @{user.username}", show_alert=True)
             return
 
-        await query.answer()
-
+        data = query.data
         if data == "toggle_power":
             bot_settings["bot_active"] = not bot_settings["bot_active"]
         elif data == "cycle_personality":
@@ -392,7 +380,6 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             context_history.clear()
             if os.path.exists(DB_FILE):
                 os.remove(DB_FILE)
-            await query.answer("Chat history wiped clean!", show_alert=True)
         elif data == "refresh_panel":
             pass
 
@@ -409,19 +396,11 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             if "Message is not modified" not in str(e):
                 logger.error(f"Error updating panel markup: {e}")
-                if bot_settings.get("debug_mode", True):
-                    await ctx.bot.send_message(chat_id=ADMIN_USER_ID, text=f"Panel Edit Error: {e}")
 
         asyncio.create_task(background_push(True, f"panel update: {data}"))
 
     except Exception as e:
-        err_trace = traceback.format_exc()
-        logger.error(f"Callback Handler Crash: {e}\n{err_trace}")
-        if bot_settings.get("debug_mode", True):
-            try:
-                await ctx.bot.send_message(chat_id=ADMIN_USER_ID, text=f"🔴 **Callback Crash!**\nError: `{e}`\n\nTraceback:\n`{err_trace[:3000]}`", parse_mode="Markdown")
-            except:
-                pass
+        logger.error(f"Callback Handler Crash: {e}")
 
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
