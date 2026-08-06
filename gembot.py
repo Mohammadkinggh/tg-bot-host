@@ -18,6 +18,8 @@ import time
 import subprocess
 import sys
 import urllib.request
+import traceback
+import datetime
 
 import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -134,8 +136,9 @@ DEFAULT_SETTINGS = {
     "verbosity": "medium",    # options: short, medium, long
     "auto_roast_mentions": True,
     "profanity_filter": False,
-    "language_mode": "auto",  # options: auto, en_only, fa_only
-    "max_reply_sentences": 2
+    "language_mode": "auto",  # options: auto, en_only, fa_only,
+    "max_reply_sentences": 2,
+    "debug_mode": True
 }
 
 def load_settings() -> dict:
@@ -273,6 +276,7 @@ def get_control_panel_markup() -> InlineKeyboardMarkup:
     s = bot_settings
     status_emoji = "🟢 ON" if s["bot_active"] else "🔴 OFF"
     profanity_emoji = "🔥 YES" if not s["profanity_filter"] else "🧼 NO"
+    debug_emoji = "🟢 ON" if s.get("debug_mode", True) else "🔴 OFF"
 
     keyboard = [
         [InlineKeyboardButton(f"Bot Power: {status_emoji}", callback_data="toggle_power")],
@@ -284,6 +288,7 @@ def get_control_panel_markup() -> InlineKeyboardMarkup:
             InlineKeyboardButton(f"🌐 Lang: {s['language_mode'].upper()}", callback_data="cycle_lang"),
             InlineKeyboardButton(f"🤬 Profanity: {profanity_emoji}", callback_data="toggle_profanity")
         ],
+        [InlineKeyboardButton(f"🐛 Debug Mode: {debug_emoji}", callback_data="toggle_debug")],
         [
             InlineKeyboardButton("🧹 Clear Chat RAM", callback_data="clear_history"),
             InlineKeyboardButton("🔄 Refresh Panel", callback_data="refresh_panel")
@@ -296,7 +301,20 @@ async def cmd_panel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not msg or not msg.from_user:
         return
 
-    is_admin = (msg.from_user.id == ADMIN_USER_ID) or (msg.from_user.username and msg.from_user.username.lower() == ADMIN_USERNAME.lower())
+    user = msg.from_user
+    is_admin = (user.id == ADMIN_USER_ID) or (user.username and user.username.lower() == ADMIN_USERNAME.lower())
+    
+    if bot_settings.get("debug_mode", True):
+        debug_info = (
+            f"🐛 **Panel Call Debug**\n"
+            f"User ID: `{user.id}`\n"
+            f"Username: `@{user.username}`\n"
+            f"Is Admin? `{is_admin}`\n"
+            f"Target ID: `{ADMIN_USER_ID}`\n"
+            f"Target User: `@{ADMIN_USERNAME}`"
+        )
+        await msg.reply_text(debug_info, parse_mode="Markdown")
+
     if not is_admin:
         await msg.reply_text("stfu you ain't my admin nigga 🖕😂")
         return
@@ -320,56 +338,90 @@ async def cmd_sethome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
-
-    user = query.from_user
-    is_admin = (user.id == ADMIN_USER_ID) or (user.username and user.username.lower() == ADMIN_USERNAME.lower())
-    if not is_admin:
-        await query.answer("Unauthorized!", show_alert=True)
+    if not query or not query.from_user:
         return
-
-    data = query.data
     global bot_settings
-
-    if data == "toggle_power":
-        bot_settings["bot_active"] = not bot_settings["bot_active"]
-    elif data == "cycle_personality":
-        modes = ["savage", "wholesome", "nerd", "drunk", "default", "assistant", "chill"]
-        curr = bot_settings["personality"]
-        next_mode = modes[(modes.index(curr) + 1) % len(modes)]
-        bot_settings["personality"] = next_mode
-    elif data == "cycle_verbosity":
-        modes = ["short", "medium", "long", "default"]
-        curr = bot_settings["verbosity"]
-        next_mode = modes[(modes.index(curr) + 1) % len(modes)]
-        bot_settings["verbosity"] = next_mode
-    elif data == "cycle_lang":
-        modes = ["auto", "en_only", "fa_only"]
-        curr = bot_settings["language_mode"]
-        next_mode = modes[(modes.index(curr) + 1) % len(modes)]
-        bot_settings["language_mode"] = next_mode
-    elif data == "toggle_profanity":
-        bot_settings["profanity_filter"] = not bot_settings["profanity_filter"]
-    elif data == "clear_history":
-        context_history.clear()
-        if os.path.exists(DB_FILE):
-            os.remove(DB_FILE)
-        await query.answer("Chat history wiped clean!", show_alert=True)
-    elif data == "refresh_panel":
-        pass
-
-    save_settings(bot_settings)
-
     try:
-        await query.edit_message_text(
-            "🎛️ **GemAI Command Center** 🎛️\n\nManage all bot settings instantly below:",
-            reply_markup=get_control_panel_markup(),
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        logger.error(f"Error updating panel markup: {e}")
+        user = query.from_user
+        is_admin = (user.id == ADMIN_USER_ID) or (user.username and user.username.lower() == ADMIN_USERNAME.lower())
+        data = query.data
 
-    asyncio.create_task(background_push(True, f"panel update: {data}"))
+        if bot_settings.get("debug_mode", True):
+            debug_info = (
+                f"🐛 **Panel Action Debug**\n"
+                f"User: `@{user.username}` (`{user.id}`)\n"
+                f"Is Admin: `{is_admin}`\n"
+                f"Button Clicked: `{data}`"
+            )
+            # Send debug info to the clicking user
+            try:
+                await ctx.bot.send_message(chat_id=user.id, text=debug_info, parse_mode="Markdown")
+                if user.id != ADMIN_USER_ID:
+                    await ctx.bot.send_message(chat_id=ADMIN_USER_ID, text=f"Admin Alert: {debug_info}", parse_mode="Markdown")
+            except:
+                pass
+
+        if not is_admin:
+            await query.answer(f"Unauthorized! Your ID: {user.id}, Username: @{user.username}", show_alert=True)
+            return
+
+        await query.answer()
+
+        if data == "toggle_power":
+            bot_settings["bot_active"] = not bot_settings["bot_active"]
+        elif data == "cycle_personality":
+            modes = ["savage", "wholesome", "nerd", "drunk", "default", "assistant", "chill"]
+            curr = bot_settings["personality"]
+            next_mode = modes[(modes.index(curr) + 1) % len(modes)]
+            bot_settings["personality"] = next_mode
+        elif data == "cycle_verbosity":
+            modes = ["short", "medium", "long", "default"]
+            curr = bot_settings["verbosity"]
+            next_mode = modes[(modes.index(curr) + 1) % len(modes)]
+            bot_settings["verbosity"] = next_mode
+        elif data == "cycle_lang":
+            modes = ["auto", "en_only", "fa_only"]
+            curr = bot_settings["language_mode"]
+            next_mode = modes[(modes.index(curr) + 1) % len(modes)]
+            bot_settings["language_mode"] = next_mode
+        elif data == "toggle_profanity":
+            bot_settings["profanity_filter"] = not bot_settings["profanity_filter"]
+        elif data == "toggle_debug":
+            bot_settings["debug_mode"] = not bot_settings.get("debug_mode", True)
+        elif data == "clear_history":
+            context_history.clear()
+            if os.path.exists(DB_FILE):
+                os.remove(DB_FILE)
+            await query.answer("Chat history wiped clean!", show_alert=True)
+        elif data == "refresh_panel":
+            pass
+
+        save_settings(bot_settings)
+
+        # Update the panel message with a timestamp to force a re-render
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        try:
+            await query.edit_message_text(
+                f"🎛️ **GemAI Command Center** 🎛️\n\nStatus: Active | Last Action: `{data}` at `{ts}`\nManage all bot settings instantly below:",
+                reply_markup=get_control_panel_markup(),
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            if "Message is not modified" not in str(e):
+                logger.error(f"Error updating panel markup: {e}")
+                if bot_settings.get("debug_mode", True):
+                    await ctx.bot.send_message(chat_id=ADMIN_USER_ID, text=f"Panel Edit Error: {e}")
+
+        asyncio.create_task(background_push(True, f"panel update: {data}"))
+
+    except Exception as e:
+        err_trace = traceback.format_exc()
+        logger.error(f"Callback Handler Crash: {e}\n{err_trace}")
+        if bot_settings.get("debug_mode", True):
+            try:
+                await ctx.bot.send_message(chat_id=ADMIN_USER_ID, text=f"🔴 **Callback Crash!**\nError: `{e}`\n\nTraceback:\n`{err_trace[:3000]}`", parse_mode="Markdown")
+            except:
+                pass
 
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
