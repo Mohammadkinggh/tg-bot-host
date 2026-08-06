@@ -71,7 +71,7 @@ def _git(*args: str) -> None:
     except Exception as e:
         logger.error(f"[git] {' '.join(args[:2])} failed: {e}")
 
-def git_push_state(force: bool = False) -> None:
+def git_push_state(force: bool = False, commit_msg: str | None = None) -> None:
     """Commit and push state files to the repo so memory survives runner death."""
     global _last_push
     now = time.time()
@@ -85,7 +85,8 @@ def git_push_state(force: bool = False) -> None:
     _git("config", "user.email", "gembot@users.noreply.github.com")
     _git("config", "user.name", "gembot")
     _git("add", "-A")
-    _git("commit", "-m", f"state sync {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}")
+    msg = commit_msg or f"state sync {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}"
+    _git("commit", "-m", msg)
     _git("push", f"https://x-access-token:{gh_token}@github.com/{repo}.git", "HEAD:main")
 
 async def background_push(force: bool = False, message: str = None):
