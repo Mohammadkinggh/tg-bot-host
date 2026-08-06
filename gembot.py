@@ -35,10 +35,14 @@ ADMIN_USER_IDS = [6592796294, 8439794110]
 ADMIN_USERNAMES = ["mokingh", "alidabigpoly"]
 
 def is_admin_user(user_id: int, username: str | None = None) -> bool:
+    logger.info(f"Checking admin for ID: {user_id}, Username: {username}")
     if user_id in ADMIN_USER_IDS:
+        logger.info(f"ID {user_id} found in ADMIN_USER_IDS")
         return True
     if username and username.lower() in ADMIN_USERNAMES:
+        logger.info(f"Username {username} found in ADMIN_USERNAMES")
         return True
+    logger.info("Not an admin.")
     return False
 
 ROUTER_URL = os.environ.get("ROUTER_URL", "https://9router-production-2d70.up.railway.app/v1")
@@ -313,17 +317,6 @@ async def cmd_panel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     user = msg.from_user
     is_admin = is_admin_user(user.id, user.username)
-    
-    if bot_settings.get("debug_mode", True):
-        debug_info = (
-            f"🐛 **Panel Call Debug**\n"
-            f"User ID: `{user.id}`\n"
-            f"Username: `@{user.username}`\n"
-            f"Is Admin? `{is_admin}`\n"
-            f"Target ID: `{ADMIN_USER_ID}`\n"
-            f"Target User: `@{ADMIN_USERNAME}`"
-        )
-        await msg.reply_text(debug_info, parse_mode="Markdown")
 
     if not is_admin:
         await msg.reply_text("stfu you ain't my admin nigga 🖕😂")
@@ -344,8 +337,9 @@ async def cmd_sethome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     bot_settings["home_chat_id"] = msg.chat.id
     save_settings(bot_settings)
-    git_push_state(force=True)
+    asyncio.create_task(background_push(force=True))
     await msg.reply_text(f"🏠 Home set to this chat! (ID: {msg.chat.id})\nI will only operate here now, haji. 💀🔥")
+
 
 async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -359,13 +353,32 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         pass
 
     global bot_settings
-    try:
-        user = query.from_user
-        is_admin = is_admin_user(user.id, user.username)
-        if not is_admin:
-            return
+    user = query.from_user
+    is_admin = is_admin_user(user.id, user.username)
+    data = query.data
+    
+    # Debugging: Send info if debug_mode is on
+    if bot_settings.get("debug_mode", True):
+        debug_msg = (
+            f"🐛 **DEBUG: Panel Action**\n"
+            f"User: @{user.username} ({user.id})\n"
+            f"Is Admin: {is_admin}\n"
+            f"Action: `{data}`\n"
+            f"Time: {datetime.datetime.now().strftime('%H:%M:%S')}"
+        )
+        try:
+            # Send to the clicking user
+            await ctx.bot.send_message(chat_id=user.id, text=debug_msg)
+            # Also send to boss if Ali clicked
+            if user.id != 6592796294:
+                await ctx.bot.send_message(chat_id=6592796294, text=f"Panel Alert from {user.username}:\n{debug_msg}")
+        except Exception as e:
+            logger.error(f"Failed to send debug msg: {e}")
 
-        data = query.data
+    if not is_admin:
+        return
+
+    try:
         if data == "toggle_power":
             bot_settings["bot_active"] = not bot_settings["bot_active"]
         elif data == "cycle_personality":
@@ -391,6 +404,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             context_history.clear()
             if os.path.exists(DB_FILE):
                 os.remove(DB_FILE)
+            await query.answer("Chat history wiped clean!", show_alert=True)
         elif data == "refresh_panel":
             pass
 
@@ -400,7 +414,10 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         try:
             await query.edit_message_text(
-                f"🎛️ **GemAI Command Center** 🎛️\n\nStatus: Active | Last Action: `{data}` at `{ts}`\nManage all bot settings instantly below:",
+                f"🎛️ **GemAI Command Center** 🎛️\n\n"
+                f"Status: {'Active' if bot_settings['bot_active'] else 'Paused'}\n"
+                f"Last Action: `{data}` at `{ts}`\n"
+                f"Manage all bot settings instantly below:",
                 reply_markup=get_control_panel_markup(),
                 parse_mode="Markdown"
             )
@@ -411,7 +428,12 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(background_push(True, f"panel update: {data}"))
 
     except Exception as e:
-        logger.error(f"Callback Handler Crash: {e}")
+        err_trace = traceback.format_exc()
+        logger.error(f"Callback Handler Crash: {e}\n{err_trace}")
+        try:
+            await ctx.bot.send_message(chat_id=user.id, text=f"🔴 **Callback Crash!**\nError: `{e}`\n\nTrace: `{err_trace[:2000]}`")
+        except:
+            pass
 
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -474,7 +496,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         context_history[chat_id_str].append({"role": "user", "content": f"[{user_tag}]: {text}"})
         trim_history_to_64k(chat_id_str)
         save_history(context_history)
-        git_push_state()
+        asyncio.create_task(background_push())
 
     if not bot_settings.get("bot_active", True):
         return
@@ -584,7 +606,7 @@ def main():
             logger.error(f"[supervisor] bot crashed: {e} — restarting in 10s")
             time.sleep(10)
 
-    git_push_state(force=True)
+    asyncio.create_task(background_push(force=True))
     logger.info("[bye] run complete, state pushed. Handoff to next scheduled run.")
 
 if __name__ == "__main__":
