@@ -382,6 +382,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         if data == "toggle_power":
             bot_settings["bot_active"] = not bot_settings["bot_active"]
+            logger.info(f"Bot Power toggled to: {bot_settings['bot_active']}")
         elif data == "cycle_personality":
             modes = ["savage", "wholesome", "nerd", "drunk", "default", "assistant", "chill"]
             curr = bot_settings["personality"]
@@ -413,10 +414,11 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         # Update the panel message with a timestamp to force a re-render
         ts = datetime.datetime.now().strftime("%H:%M:%S")
+        status_text = "Active" if bot_settings.get("bot_active", True) else "Paused"
         try:
             await query.edit_message_text(
                 f"🎛️ **GemAI Command Center** 🎛️\n\n"
-                f"Status: {'Active' if bot_settings['bot_active'] else 'Paused'}\n"
+                f"Status: {status_text}\n"
                 f"Last Action: `{data}` at `{ts}`\n"
                 f"Manage all bot settings instantly below:",
                 reply_markup=get_control_panel_markup(),
@@ -435,7 +437,6 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_message(chat_id=user.id, text=f"🔴 **Callback Crash!**\nError: `{e}`\n\nTrace: `{err_trace[:2000]}`")
         except:
             pass
-
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or not msg.from_user:
