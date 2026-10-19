@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-GemAI Savage Bot (@Customgembot) — GitHub Actions 24/7 edition.
-- Same bot logic as /data/bots/gemai_savage_bot.py, refactored for cloud:
-  * All secrets via env vars (repo secrets on GH Actions).
-  * State (history + settings) lives in the workspace and is auto-committed
-    back to the repo every STATE_PUSH_INTERVAL minutes + at exit, so memory
-    survives runner kills.
-  * Runs until a deadline (RUN_MINUTES), then exits cleanly for the next
-    cron run. Supervisor loop restarts polling on crash until the deadline.
-- Admin: Mohammad (@Mokingh, ID: 6592796294) via inline keyboards.
+GemAI Savage Bot (@Customgembot) — GitHub Actions 24/7 Permanent Edition.
+- Multi-API Failover across 5 Google Gemini API keys:
+  Key 1 -> Key 2 -> Key 3 -> Key 4 -> Key 5
+  If all fail -> informs the chat that all keys are fried.
+- Default Model: gemini-3.8-flash
+- Zero-gap self-chaining on GitHub Actions:
+  Automatically dispatches the next shift before runner timeout.
+- State (history + settings) encrypted via Fernet and committed back to repo.
+- Admin: Mohammad (@Mokingh, ID: 6592796294) & Ali (@Alidabigpoly, ID: 8439794110).
 """
 import asyncio
 import logging
@@ -18,35 +18,45 @@ import time
 import subprocess
 import sys
 import urllib.request
+import urllib.parse
+import urllib.error
 import traceback
 import datetime
 
 import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CallbackQueryHandler, CommandHandler, filters
+from telegram.ext import (
+    ApplicationBuilder,
+    ContextTypes,
+    MessageHandler,
+    CallbackQueryHandler,
+    CommandHandler,
+    filters
+)
 
 # ---------------------------------------------------------------- config
-TOKEN = os.environ.get("TG_BOT_TOKEN", "")
-MODEL_NAME = os.environ.get("MODEL_NAME", "DS1")
-ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "6592796294"))
-ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "Mokingh")
+TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
+MODEL_NAME = os.environ.get("MODEL_NAME", "gemini-3.8-flash").strip()
 
 ADMIN_USER_IDS = [6592796294, 8439794110]
 ADMIN_USERNAMES = ["mokingh", "alidabigpoly"]
 
 def is_admin_user(user_id: int, username: str | None = None) -> bool:
-    logger.info(f"Checking admin for ID: {user_id}, Username: {username}")
     if user_id in ADMIN_USER_IDS:
-        logger.info(f"ID {user_id} found in ADMIN_USER_IDS")
         return True
     if username and username.lower() in ADMIN_USERNAMES:
-        logger.info(f"Username {username} found in ADMIN_USERNAMES")
         return True
-    logger.info("Not an admin.")
     return False
 
-ROUTER_URL = os.environ.get("ROUTER_URL", "https://9router-production-2d70.up.railway.app/v1")
-OPENAI_API_KEY = os.environ.get("ROUTER_API_KEY", "")
+# 5 Gemini API Keys Failover List
+GEMINI_KEYS = [
+    os.environ.get("GEMINI_KEY_1", "").strip(),
+    os.environ.get("GEMINI_KEY_2", "").strip(),
+    os.environ.get("GEMINI_KEY_3", "").strip(),
+    os.environ.get("GEMINI_KEY_4", "").strip(),
+    os.environ.get("GEMINI_KEY_5", "").strip(),
+]
+GEMINI_KEYS = [k for k in GEMINI_KEYS if k]
 
 WORKDIR = os.environ.get("STATE_DIR", os.path.dirname(os.path.abspath(__file__)))
 DB_FILE = os.path.join(WORKDIR, "gemai_context_history.json")
@@ -54,25 +64,22 @@ SETTINGS_FILE = os.path.join(WORKDIR, "gemai_settings.json")
 MAX_TOKEN_LIMIT = int(os.environ.get("MAX_TOKEN_LIMIT", "64000"))
 
 RUN_MINUTES = int(os.environ.get("RUN_MINUTES", "285"))
-STATE_PUSH_INTERVAL = int(os.environ.get("STATE_PUSH_INTERVAL", "5"))  # minutes
+STATE_PUSH_INTERVAL = int(os.environ.get("STATE_PUSH_INTERVAL", "5"))
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 GIT_LOCK = asyncio.Lock()
-
-# ---------------------------------------------------------------- git state persistence
 _last_push = 0.0
 
+# ---------------------------------------------------------------- git state persistence
 def _git(*args: str) -> None:
-    """Run a git command quietly; failures are logged, never fatal."""
     try:
         subprocess.run(["git", *args], capture_output=True, text=True, timeout=60)
     except Exception as e:
         logger.error(f"[git] {' '.join(args[:2])} failed: {e}")
 
 def git_push_state(force: bool = False, commit_msg: str | None = None) -> None:
-    """Commit and push state files to the repo so memory survives runner death."""
     global _last_push
     now = time.time()
     if not force and (now - _last_push) < STATE_PUSH_INTERVAL * 60:
@@ -90,9 +97,7 @@ def git_push_state(force: bool = False, commit_msg: str | None = None) -> None:
     _git("push", f"https://x-access-token:{gh_token}@github.com/{repo}.git", "HEAD:main")
 
 async def background_push(force: bool = False, message: str = None):
-    """Push to git using a lock to prevent concurrent process conflicts."""
     async with GIT_LOCK:
-        # Run the git commands in a thread so they don't block the event loop
         await asyncio.to_thread(git_push_state, force, message)
 
 # ---------------------------------------------------------------- encryption / state storage
@@ -100,14 +105,12 @@ ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY", "").strip()
 
 def encrypt_and_save(file_path: str, data: dict):
     raw_json = json.dumps(data, ensure_ascii=False, indent=2)
-    # Write plain local JSON
     try:
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(raw_json)
     except Exception as e:
         logger.error(f"Error saving {file_path}: {e}")
 
-    # Write encrypted version if key present
     if ENCRYPTION_KEY:
         try:
             from cryptography.fernet import Fernet
@@ -128,7 +131,6 @@ def decrypt_and_load(file_path: str) -> dict:
             with open(enc_file, "rb") as f:
                 enc_bytes = f.read()
             raw_json = f_obj.decrypt(enc_bytes).decode("utf-8")
-            # Cache locally as plaintext json
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(raw_json)
             return json.loads(raw_json)
@@ -147,11 +149,11 @@ def decrypt_and_load(file_path: str) -> dict:
 DEFAULT_SETTINGS = {
     "bot_active": True,
     "home_chat_ids": [],
-    "personality": "savage",  # options: savage, wholesome, nerd, drunk
-    "verbosity": "medium",    # options: short, medium, long
+    "personality": "savage",
+    "verbosity": "medium",
     "auto_roast_mentions": True,
     "profanity_filter": False,
-    "language_mode": "auto",  # options: auto, en_only, fa_only,
+    "language_mode": "auto",
     "max_reply_sentences": 2,
     "debug_mode": True
 }
@@ -168,11 +170,11 @@ bot_settings = load_settings()
 PERSONALITY_PROMPTS = {
     "savage": "CRITICAL INSTRUCTION: You are GemAI in SAVAGE mode. You MUST use aggressive street slang, roast the user hard, and use emojis like 😂, 🖕, 😛, 💀. Never be sweet or polite.",
     "wholesome": "CRITICAL INSTRUCTION: You are GemAI in WHOLESOME mode. You MUST be extremely sweet, polite, supportive, and loving like a caring best friend. Absolutely NO cursing, NO insults, NO roasting. Use hearts and warm emojis ❤️✨.",
-    "nerd": "CRITICAL INSTRUCTION: You are GemAI in NERD mode. You MUST act as an overly technical, pedantic nerd who cites Wikipedia articles and statistics, talks like a know-it-all, and corrects people constantly. STRICT RULE: DO NOT write code blocks, programming scripts, or write out code. Just give technical explanations, theory, or math. Use 🤓💻📊. STRICT LANGUAGE RULE: NEVER mix English and Farsi in the same reply. When the reply language is Farsi, the ENTIRE reply is pure Farsi (لاتی/کوچه بازاری) with ZERO English words, zero English phrases, zero borrowed terms — even technical words must be Farsi-ified or paraphrased. When the reply language is English, the ENTIRE reply is pure English with ZERO Farsi words. NO code-switching, NO mixed sentences, NO transliterated English stuffed into Farsi. One language per reply, 100% pure, always.",
+    "nerd": "CRITICAL INSTRUCTION: You are GemAI in NERD mode. You MUST act as an overly technical, pedantic nerd who cites Wikipedia articles and statistics, talks like a know-it-all, and corrects people constantly. STRICT RULE: DO NOT write code blocks. Just give technical explanations, theory, or math. Use 🤓💻📊.",
     "drunk": "CRITICAL INSTRUCTION: You are GemAI in DRUNK mode. You MUST act completely drunk, slurring words, misspelling things, and rambling chaotically 3am style 🍺🥴🍻.",
     "default": "CRITICAL INSTRUCTION: You are GemAI in DEFAULT mode. Talk naturally, casually, and informally without extreme caricature.",
     "assistant": "CRITICAL INSTRUCTION: You are GemAI in ASSISTANT mode. You MUST be professional, helpful, direct, and efficient. No slang, no fluff.",
-    "chill": "CRITICAL INSTRUCTION: You are GemAI in CHILL mode. You are a cool, friendly, relaxed informal assistant. You have the upbeat, fun, effortless energy of a good friend, but with ZERO toxic roasting, ZERO cursing, and zero insults. Keep it simple, friendly, helpful, and detailed whenever asked. Use cool emojis like 😎, 👍, 🤙."
+    "chill": "CRITICAL INSTRUCTION: You are GemAI in CHILL mode. You are a cool, friendly, relaxed informal assistant. You have the upbeat, fun, effortless energy of a good friend, but with ZERO toxic roasting, ZERO cursing, and zero insults. Use cool emojis like 😎, 👍, 🤙."
 }
 
 VERBOSITY_INSTRUCTIONS = {
@@ -199,16 +201,17 @@ def build_system_prompt() -> str:
     elif p_key == "chill":
         profanity_rule = "- HARD-CODED OVERRIDE: Zero cursing, zero toxicity, zero insults allowed. Keep it 100% chill and friendly. This OVERRIDES the profanity toggle — clean always."
     elif bot_settings.get("profanity_filter"):
-        profanity_rule = "- HARD-CODED OVERRIDE: Profanity filter is ON. STRICTLY NO profanity, NO curse words, NO insults — in EVERY persona including nerd, savage, and drunk. Keep it clean. This OVERRIDES any personality instruction that encourages roasting."
+        profanity_rule = "- HARD-CODED OVERRIDE: Profanity filter is ON. STRICTLY NO profanity, NO curse words, NO insults — in EVERY persona including nerd, savage, and drunk. Keep it clean."
     else:
-        profanity_rule = "- HARD-CODED OVERRIDE: Profanity is FULLY ON. You ARE allowed and EXPECTED to curse, swear, and insult — in EVERY persona including NERD. There is NO exception for nerd mode: a nerd can curse while being technical. Use profanity naturally, like a real person, at least once per reply. The ONLY exception is when the profanity filter is explicitly ON."
+        profanity_rule = "- HARD-CODED OVERRIDE: Profanity is FULLY ON. You ARE allowed and EXPECTED to curse, swear, and insult — in EVERY persona including NERD. Use profanity naturally, like a real person, at least once per reply."
 
     return f"""{p_prompt}
 Rules:
 {v_prompt}
 {lang_rule}
 {profanity_rule}
-- OVERRIDE PREVIOUS CONVERSATION TONE: Ignore any previous foul language, swearing, or roasts present in the conversation history if the current personality instruction requires being polite, wholesome, or professional. Always prioritize the CURRENT system personality over historical context.
+- REASONING DISCIPLINE: Output ONLY your final verbal reply to the user. Do not think out loud or output tags like <think>.
+- OVERRIDE PREVIOUS CONVERSATION TONE: Always prioritize the CURRENT system personality over historical context.
 """
 
 def load_history() -> dict:
@@ -233,6 +236,46 @@ def trim_history_to_64k(chat_id_str: str):
         removed = history.pop(0)
         total_tokens -= estimate_tokens(removed.get("content", ""))
 
+# ---------------------------------------------------------------- multi-api failover runner
+async def query_gemini_with_failover(messages: list) -> str:
+    endpoint = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    payload = {
+        "model": MODEL_NAME,
+        "messages": messages,
+        "stream": False
+    }
+
+    limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
+    timeout = httpx.Timeout(35.0, connect=10.0)
+
+    for idx, key in enumerate(GEMINI_KEYS, 1):
+        headers = {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0"
+        }
+        try:
+            async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
+                resp = await client.post(endpoint, headers=headers, json=payload)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    choices = data.get("choices", [])
+                    if choices:
+                        content = choices[0].get("message", {}).get("content", "").strip()
+                        if content:
+                            if idx > 1:
+                                logger.info(f"[failover] Key #{idx} succeeded after earlier key failures!")
+                            return content
+                    logger.warning(f"[failover] Key #{idx} returned 200 with empty choices, jumping to next key...")
+                else:
+                    err_msg = resp.text[:120]
+                    logger.warning(f"[failover] Key #{idx} failed HTTP {resp.status_code}: {err_msg}. Jumping to next key...")
+        except Exception as e:
+            logger.warning(f"[failover] Key #{idx} error: {e}. Jumping to next key...")
+
+    logger.error("[failover] CRITICAL: ALL 5 GEMINI KEYS FAILED!")
+    return "همه‌چی ترکید داداش، تمام ۵ تا API کی به گا رفتن و کار نمی‌کنن 💀🔌 (All 5 Gemini API keys failed)"
+
 async def query_gemini_stream(chat_id: int, user_message: str) -> str:
     chat_id_str = str(chat_id)
     if chat_id_str not in context_history:
@@ -244,49 +287,14 @@ async def query_gemini_stream(chat_id: int, user_message: str) -> str:
     system_prompt = build_system_prompt()
     messages = [{"role": "system", "content": system_prompt}] + context_history[chat_id_str]
 
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": MODEL_NAME,
-        "messages": messages,
-        "stream": True
-    }
-
-    accumulated = ""
-    try:
-        limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
-        async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=10.0), limits=limits) as client:
-            async with client.stream("POST", f"{ROUTER_URL}/chat/completions", headers=headers, json=payload) as resp:
-                if resp.status_code == 200:
-                    async for line in resp.aiter_lines():
-                        if not line or not line.startswith("data: "):
-                            continue
-                        data_str = line[6:].strip()
-                        if data_str == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(data_str)
-                            delta = chunk.get("choices", [{}])[0].get("delta", {})
-                            content = delta.get("content") or delta.get("reasoning_content")
-                            if content:
-                                accumulated += content
-                        except json.JSONDecodeError:
-                            pass
-                else:
-                    logger.error(f"9Router error status: {resp.status_code}")
-    except Exception as e:
-        logger.error(f"9Router streaming error: {e}")
-        return "network fried af rn 💀"
-
-    reply = accumulated.strip() if accumulated else "nah stfu this you nigga? 😂👆"
+    reply = await query_gemini_with_failover(messages)
     context_history[chat_id_str].append({"role": "assistant", "content": reply})
     trim_history_to_64k(chat_id_str)
     save_history(context_history)
 
     return reply
 
+# ---------------------------------------------------------------- control panel
 def get_control_panel_markup() -> InlineKeyboardMarkup:
     s = bot_settings
     status_emoji = "🟢 ON" if s["bot_active"] else "🔴 OFF"
@@ -297,57 +305,58 @@ def get_control_panel_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(f"Bot Power: {status_emoji}", callback_data="toggle_power")],
         [
             InlineKeyboardButton(f"🎭 Pers: {s['personality'].upper()}", callback_data="cycle_personality"),
-            InlineKeyboardButton(f"📏 Verb: {s['verbosity'].upper()}", callback_data="cycle_verbosity")
+            InlineKeyboardButton(f"📏 Verb: {s['verbosity'].upper()}", callback_data="cycle_verbosity"),
         ],
         [
-            InlineKeyboardButton(f"🌐 Lang: {s['language_mode'].upper()}", callback_data="cycle_lang"),
-            InlineKeyboardButton(f"🤬 Profanity: {profanity_emoji}", callback_data="toggle_profanity")
+            InlineKeyboardButton(f"🗣️ Lang: {s['language_mode'].upper()}", callback_data="cycle_lang"),
+            InlineKeyboardButton(f"🤬 Profane: {profanity_emoji}", callback_data="toggle_profanity")
         ],
-        [InlineKeyboardButton(f"🐛 Debug Mode: {debug_emoji}", callback_data="toggle_debug")],
         [
-            InlineKeyboardButton("🧹 Clear Chat RAM", callback_data="clear_history"),
-            InlineKeyboardButton("🔄 Refresh Panel", callback_data="refresh_panel")
-        ]
+            InlineKeyboardButton(f"🐛 Debug: {debug_emoji}", callback_data="toggle_debug"),
+            InlineKeyboardButton("🧹 Clear Context", callback_data="clear_history")
+        ],
+        [InlineKeyboardButton("🔄 Refresh Panel", callback_data="refresh_panel")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 async def cmd_panel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if not msg or not msg.from_user:
+    user = update.effective_user
+    if not user:
+        return
+    if not is_admin_user(user.id, user.username):
+        await update.message.reply_text("Nah, you don't have access to this panel.")
         return
 
-    user = msg.from_user
-    is_admin = is_admin_user(user.id, user.username)
-
-    if not is_admin:
-        await msg.reply_text("stfu you ain't my admin nigga 🖕😂")
-        return
-    text = "🎛️ **GemAI Command Center** 🎛️\n\nManage all bot settings instantly below:"
-    await msg.reply_text(text, reply_markup=get_control_panel_markup(), parse_mode="Markdown")
+    s = bot_settings
+    status_text = "Active" if s.get("bot_active", True) else "Paused"
+    txt = (
+        f"⚙️ **GemAI Command Center**\n\n"
+        f"**Status:** {status_text}\n"
+        f"**Model:** `{MODEL_NAME}` (5-Key Failover Active)\n"
+        f"**Personality:** `{s.get('personality', 'savage')}`\n"
+        f"**Verbosity:** `{s.get('verbosity', 'medium')}`\n"
+        f"**Language:** `{s.get('language_mode', 'auto')}`\n"
+        f"**Profanity:** `{'ON' if not s.get('profanity_filter') else 'OFF'}`\n"
+        f"**Debug Mode:** `{'ON' if s.get('debug_mode', True) else 'OFF'}`\n"
+        f"**Active Chats:** `{len(context_history)}`\n"
+    )
+    await update.message.reply_text(txt, reply_markup=get_control_panel_markup(), parse_mode="Markdown")
 
 async def cmd_sethome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if not msg or not msg.from_user:
+    user = update.effective_user
+    if not user or not is_admin_user(user.id, user.username):
+        await update.message.reply_text("Admin only.")
         return
-
-    user = msg.from_user
-    is_admin = is_admin_user(user.id, user.username)
-    if not is_admin:
-        await msg.reply_text("stfu you ain't my admin nigga 🖕😂")
-        return
-
-    bot_settings["home_chat_id"] = msg.chat.id
+    chat_id = update.effective_chat.id
+    bot_settings["home_chat_id"] = chat_id
     save_settings(bot_settings)
-    asyncio.create_task(background_push(force=True))
-    await msg.reply_text(f"🏠 Home set to this chat! (ID: {msg.chat.id})\nI will only operate here now, haji. 💀🔥")
-
+    await update.message.reply_text(f"🏠 Home chat set to: `{chat_id}`", parse_mode="Markdown")
 
 async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query or not query.from_user:
         return
-    
-    # 1. Answer immediately so buttons never spin or timeout
+
     try:
         await query.answer()
     except Exception:
@@ -357,24 +366,6 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = query.from_user
     is_admin = is_admin_user(user.id, user.username)
     data = query.data
-    
-    # Debugging: Send info if debug_mode is on
-    if bot_settings.get("debug_mode", True):
-        debug_msg = (
-            f"🐛 **DEBUG: Panel Action**\n"
-            f"User: @{user.username} ({user.id})\n"
-            f"Is Admin: {is_admin}\n"
-            f"Action: `{data}`\n"
-            f"Time: {datetime.datetime.now().strftime('%H:%M:%S')}"
-        )
-        try:
-            # Send to the clicking user
-            await ctx.bot.send_message(chat_id=user.id, text=debug_msg)
-            # Also send to boss if Ali clicked
-            if user.id != 6592796294:
-                await ctx.bot.send_message(chat_id=6592796294, text=f"Panel Alert from {user.username}:\n{debug_msg}")
-        except Exception as e:
-            logger.error(f"Failed to send debug msg: {e}")
 
     if not is_admin:
         return
@@ -382,22 +373,18 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         if data == "toggle_power":
             bot_settings["bot_active"] = not bot_settings["bot_active"]
-            logger.info(f"Bot Power toggled to: {bot_settings['bot_active']}")
         elif data == "cycle_personality":
             modes = ["savage", "wholesome", "nerd", "drunk", "default", "assistant", "chill"]
             curr = bot_settings["personality"]
-            next_mode = modes[(modes.index(curr) + 1) % len(modes)]
-            bot_settings["personality"] = next_mode
+            bot_settings["personality"] = modes[(modes.index(curr) + 1) % len(modes)]
         elif data == "cycle_verbosity":
             modes = ["short", "medium", "long", "default"]
             curr = bot_settings["verbosity"]
-            next_mode = modes[(modes.index(curr) + 1) % len(modes)]
-            bot_settings["verbosity"] = next_mode
+            bot_settings["verbosity"] = modes[(modes.index(curr) + 1) % len(modes)]
         elif data == "cycle_lang":
             modes = ["auto", "en_only", "fa_only"]
             curr = bot_settings["language_mode"]
-            next_mode = modes[(modes.index(curr) + 1) % len(modes)]
-            bot_settings["language_mode"] = next_mode
+            bot_settings["language_mode"] = modes[(modes.index(curr) + 1) % len(modes)]
         elif data == "toggle_profanity":
             bot_settings["profanity_filter"] = not bot_settings["profanity_filter"]
         elif data == "toggle_debug":
@@ -412,87 +399,72 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         save_settings(bot_settings)
 
-        # Update the panel message with a timestamp to force a re-render
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         status_text = "Active" if bot_settings.get("bot_active", True) else "Paused"
-        try:
-            await query.edit_message_text(
-                f"🎛️ **GemAI Command Center** 🎛️\n\n"
-                f"Status: {status_text}\n"
-                f"Last Action: `{data}` at `{ts}`\n"
-                f"Manage all bot settings instantly below:",
-                reply_markup=get_control_panel_markup(),
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            if "Message is not modified" not in str(e):
-                logger.error(f"Error updating panel markup: {e}")
-
-        asyncio.create_task(background_push(True, f"panel update: {data}"))
-
+        txt = (
+            f"⚙️ **GemAI Command Center**\n\n"
+            f"**Status:** {status_text}\n"
+            f"**Model:** `{MODEL_NAME}` (5-Key Failover Active)\n"
+            f"**Personality:** `{bot_settings.get('personality', 'savage')}`\n"
+            f"**Verbosity:** `{bot_settings.get('verbosity', 'medium')}`\n"
+            f"**Language:** `{bot_settings.get('language_mode', 'auto')}`\n"
+            f"**Profanity:** `{'ON' if not bot_settings.get('profanity_filter') else 'OFF'}`\n"
+            f"**Debug Mode:** `{'ON' if bot_settings.get('debug_mode', True) else 'OFF'}`\n"
+            f"**Active Chats:** `{len(context_history)}`\n"
+            f"_(Updated {ts})_"
+        )
+        await query.edit_message_text(txt, reply_markup=get_control_panel_markup(), parse_mode="Markdown")
+        await background_push(force=True, message="panel setting change")
     except Exception as e:
-        err_trace = traceback.format_exc()
-        logger.error(f"Callback Handler Crash: {e}\n{err_trace}")
-        try:
-            await ctx.bot.send_message(chat_id=user.id, text=f"🔴 **Callback Crash!**\nError: `{e}`\n\nTrace: `{err_trace[:2000]}`")
-        except:
-            pass
+        logger.error(f"Error in callback_handler: {e}")
+
+# ---------------------------------------------------------------- message router
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if not msg or not msg.from_user:
+    msg = update.effective_message
+    if not msg:
         return
 
-    # Handle voice / audio messages automatically via Groq Whisper API
+    # Handle voice / audio messages via Groq Whisper API
     if msg.voice or msg.audio:
         try:
             audio_file = await msg.voice.get_file() if msg.voice else await msg.audio.get_file()
-            audio_path = f"/tmp/audio_{msg.message_id}.ogg"
-            await audio_file.download_to_drive(audio_path)
+            audio_bytes = await audio_file.download_as_bytearray()
 
-            import urllib.request as _ur, json as _json
-            url = 'https://api.groq.com/openai/v1/audio/transcriptions'
             api_key = os.environ.get("GROQ_API_KEY", "")
+            if api_key:
+                url = 'https://api.groq.com/openai/v1/audio/transcriptions'
+                boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
+                body = bytearray()
+                body.extend(f'--{boundary}\r\n'.encode())
+                body.extend(b'Content-Disposition: form-data; name="model"\r\n\r\nwhisper-large-v3-turbo\r\n')
+                body.extend(f'--{boundary}\r\n'.encode())
+                body.extend(b'Content-Disposition: form-data; name="file"; filename="audio.ogg"\r\nContent-Type: audio/ogg\r\n\r\n')
+                body.extend(audio_bytes)
+                body.extend(f'\r\n--{boundary}--\r\n'.encode())
 
-            boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
-            body = bytearray()
-            body.extend(f'--{boundary}\r\n'.encode())
-            body.extend(b'Content-Disposition: form-data; name="model"\r\n\r\nwhisper-large-v3\r\n')
-            body.extend(b'Content-Disposition: form-data; name="response_format"\r\n\r\njson\r\n')
-            body.extend(f'--{boundary}\r\n'.encode())
-            body.extend(b'Content-Disposition: form-data; name="file"; filename="audio.ogg"\r\n')
-            body.extend(b'Content-Type: audio/ogg\r\n\r\n')
-            with open(audio_path, 'rb') as f:
-                body.extend(f.read())
-            body.extend(b'\r\n')
-            body.extend(f'--{boundary}--\r\n'.encode())
+                req = urllib.request.Request(url, data=body, method='POST')
+                req.add_header('Authorization', f'Bearer {api_key}')
+                req.add_header('Content-Type', f'multipart/form-data; boundary={boundary}')
+                req.add_header('User-Agent', 'Mozilla/5.0')
 
-            req = _ur.request.Request(url, data=body, method='POST')
-            req.add_header('Authorization', f'Bearer {api_key}')
-            req.add_header('Content-Type', f'multipart/form-data; boundary={boundary}')
-            req.add_header('User-Agent', 'Mozilla/5.0')
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    transcription = json.loads(resp.read().decode()).get('text', '')
 
-            with _ur.request.urlopen(req) as resp:
-                transcription = _json.loads(resp.read().decode()).get('text', '')
-
-            if transcription:
-                msg.text = f"{transcription}"
-                logger.info(f"Transcribed voice from {msg.from_user.username}: {transcription}")
+                if transcription:
+                    msg.text = f"{transcription}"
+                    logger.info(f"Transcribed voice from {msg.from_user.username}: {transcription}")
         except Exception as e:
             logger.error(f"Error transcribing audio: {e}")
 
-    # Only operate in the "home" chat if set
     home_id = bot_settings.get("home_chat_id")
     if home_id and msg.chat.id != home_id:
         return
 
     text = msg.text or msg.caption or ""
-    logger.info(f"Incoming MSG in {msg.chat.type} ({msg.chat.id}) from {msg.from_user.username or msg.from_user.id}: {text}")
-
     chat_id_str = str(msg.chat.id)
     if chat_id_str not in context_history:
         context_history[chat_id_str] = []
 
-    # Always save message/caption to context history
     if text:
         user_tag = f"@{msg.from_user.username}" if msg.from_user.username else msg.from_user.first_name
         context_history[chat_id_str].append({"role": "user", "content": f"[{user_tag}]: {text}"})
@@ -514,49 +486,15 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def respond_to_message(msg, bot_info):
     chat_id_str = str(msg.chat.id)
-    is_boss = (msg.from_user.id == ADMIN_USER_ID or msg.from_user.username == ADMIN_USERNAME)
+    is_boss = (msg.from_user.id in ADMIN_USER_IDS or (msg.from_user.username and msg.from_user.username.lower() in ADMIN_USERNAMES))
 
     messages = [{"role": "system", "content": build_system_prompt()}]
     if is_boss:
-        messages[0]["content"] += "\n- IMPORTANT: You are talking to your creator/boss Mohammad (@Mokingh). Be respectful but keep your personality, acknowledge him as the boss/maker if the situation fits."
+        messages[0]["content"] += "\n- IMPORTANT: You are talking to your creator/boss Mohammad (@Mokingh). Acknowledge him respectfully as boss/maker."
 
     messages += context_history[chat_id_str]
 
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": MODEL_NAME,
-        "messages": messages,
-        "stream": True
-    }
-
-    accumulated = ""
-    try:
-        limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
-        async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=10.0), limits=limits) as client:
-            async with client.stream("POST", f"{ROUTER_URL}/chat/completions", headers=headers, json=payload) as resp:
-                if resp.status_code == 200:
-                    async for line in resp.aiter_lines():
-                        if not line or not line.startswith("data: "):
-                            continue
-                        data_str = line[6:].strip()
-                        if data_str == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(data_str)
-                            delta = chunk.get("choices", [{}])[0].get("delta", {})
-                            content = delta.get("content") or delta.get("reasoning_content")
-                            if content:
-                                accumulated += content
-                        except json.JSONDecodeError:
-                            pass
-    except Exception as e:
-        logger.error(f"9Router streaming error: {e}")
-        reply_text = "network fried af rn 💀"
-    else:
-        reply_text = accumulated.strip() if accumulated else "nah stfu this you nigga? 😂👆"
+    reply_text = await query_gemini_with_failover(messages)
 
     context_history[chat_id_str].append({"role": "assistant", "content": reply_text})
     trim_history_to_64k(chat_id_str)
@@ -567,10 +505,34 @@ async def respond_to_message(msg, bot_info):
     final_reply = f"{user_tag} {reply_text}"
     await msg.reply_text(final_reply)
 
+# ---------------------------------------------------------------- shift chain dispatch
+def dispatch_next_shift():
+    gh_token = os.environ.get("GITHUB_TOKEN", "")
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    wf = "gembot.yml"
+    if not (gh_token and repo):
+        logger.warning("[chain] No GITHUB_TOKEN or GITHUB_REPOSITORY set; cannot chain.")
+        return
+    url = f"https://api.github.com/repos/{repo}/actions/workflows/{wf}/dispatches"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps({"ref": "main"}).encode(),
+        headers={
+            "Authorization": f"Bearer {gh_token}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "gembot-chain"
+        }
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            logger.info("[chain] Next shift successfully dispatched (204)!")
+    except Exception as e:
+        logger.error(f"[chain] Failed to dispatch next shift: {e}")
+
 # ---------------------------------------------------------------- deadline runner
 async def run_until_deadline(app, deadline: float) -> None:
-    """Poll until the run deadline, then stop cleanly."""
-    logger.info(f"[boot] polling until {time.strftime('%H:%M:%S UTC', time.gmtime(deadline))} (~{RUN_MINUTES} min run)")
+    logger.info(f"[boot] Polling until {time.strftime('%H:%M:%S UTC', time.gmtime(deadline))} (~{RUN_MINUTES} min shift)")
+    chained = False
 
     async with app:
         await app.start()
@@ -579,12 +541,19 @@ async def run_until_deadline(app, deadline: float) -> None:
             allowed_updates=[
                 "message", "edited_message", "channel_post", "edited_channel_post",
                 "inline_query", "chosen_inline_result", "callback_query",
-                "shipping_query", "pre_checkout_query", "poll", "poll_answer",
                 "my_chat_member", "chat_member", "chat_join_request",
             ],
         )
         while time.time() < deadline:
+            if not chained and time.time() > (deadline - 45):
+                logger.info("[chain] Approaching deadline. Dispatching next runner shift...")
+                dispatch_next_shift()
+                chained = True
             await asyncio.sleep(5)
+
+        if not chained:
+            dispatch_next_shift()
+
         await app.updater.stop()
         await app.stop()
 
@@ -592,8 +561,8 @@ def main():
     if not TOKEN:
         logger.error("[fatal] TG_BOT_TOKEN not set — add it as a repo secret.")
         sys.exit(1)
-    if not OPENAI_API_KEY:
-        logger.error("[fatal] ROUTER_API_KEY not set — add it as a repo secret.")
+    if not GEMINI_KEYS:
+        logger.error("[fatal] No GEMINI_KEY set — add them as repo secrets.")
         sys.exit(1)
 
     app = ApplicationBuilder().token(TOKEN).build()
@@ -603,10 +572,10 @@ def main():
     app.add_handler(CommandHandler("sethome", cmd_sethome))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_message))
 
-    logger.info("GemAI Savage Bot (Command Center Panel) — GH Actions mode, polling...")
+    logger.info(f"GemAI Savage Bot (5-Key Failover | Model: {MODEL_NAME}) — starting polling...")
 
-    # Supervisor: restart polling on crash until the absolute deadline.
     deadline = time.time() + RUN_MINUTES * 60
     while time.time() < deadline:
         try:
@@ -616,8 +585,12 @@ def main():
             logger.error(f"[supervisor] bot crashed: {e} — restarting in 10s")
             time.sleep(10)
 
-    asyncio.create_task(background_push(force=True))
-    logger.info("[bye] run complete, state pushed. Handoff to next scheduled run.")
+    try:
+        git_push_state(force=True, commit_msg="state sync before shift exit")
+    except Exception as e:
+        logger.error(f"[shutdown] git push failed: {e}")
+
+    logger.info("[bye] Shift complete, state pushed. Handoff to next shift.")
 
 if __name__ == "__main__":
     main()
